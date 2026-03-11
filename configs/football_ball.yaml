@@ -1,0 +1,7 @@
+path: /kaggle/working/football-ball-training/data/yolo_ball
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: ball

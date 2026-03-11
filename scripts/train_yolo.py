@@ -5,6 +5,9 @@ from pathlib import Path
 
 from ultralytics import YOLO
 
+import os
+os.environ["MPLBACKEND"] = "Agg"
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()

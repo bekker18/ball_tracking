@@ -1,4 +1,4 @@
-path: /kaggle/working/football-ball-training/data/yolo_ball
+path: /kaggle/working/ball_tracking/data/yolo_ball
 train: images/train
 val: images/val
 test: images/test

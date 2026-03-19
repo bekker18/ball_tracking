@@ -43,6 +43,7 @@ def main() -> None:
         patience=15,
         save=True,
         plots=True,
+        val=False,
     )
 
 

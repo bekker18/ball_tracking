@@ -17,7 +17,6 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="0")
     parser.add_argument("--project", type=str, default="runs")
     parser.add_argument("--name", type=str, default="football_ball_yolo11m")
-    parser.add_argument("--val", action="store_true")
     args = parser.parse_args()
 
     model = YOLO(args.model)
@@ -30,7 +29,6 @@ def main() -> None:
         device=args.device,
         project=args.project,
         name=args.name,
-        val=args.val,
         pretrained=True,
         single_cls=True,
         degrees=0.0,

@@ -1,23 +1,22 @@
+from __future__ import annotations
+
 import os
 os.environ["MPLBACKEND"] = "Agg"
 
-from __future__ import annotations
-
 import argparse
-from pathlib import Path
-
 from ultralytics import YOLO
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data", type=str, required=True, help="Path to dataset yaml")
-    parser.add_argument("--model", type=str, default="yolo11s.pt", help="Base pretrained YOLO model")
+    parser.add_argument("--data", type=str, required=True)
+    parser.add_argument("--model", type=str, default="yolo11m.pt")
     parser.add_argument("--imgsz", type=int, default=1280)
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch", type=int, default=8)
+    parser.add_argument("--batch", type=int, default=4)
     parser.add_argument("--device", type=str, default="0")
     parser.add_argument("--project", type=str, default="runs")
-    parser.add_argument("--name", type=str, default="football_ball")
+    parser.add_argument("--name", type=str, default="football_ball_yolo11m")
     args = parser.parse_args()
 
     model = YOLO(args.model)

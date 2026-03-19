@@ -141,7 +141,6 @@ def create_tile_labels(
         cx = x + w / 2.0
         cy = y + h / 2.0
 
-        # keep only boxes whose center lies inside tile
         if not (tx1 <= cx < tx2 and ty1 <= cy < ty2):
             continue
 
@@ -156,6 +155,17 @@ def create_tile_labels(
     return lines
 
 
+def sample_list(items: List, ratio: float, rng: random.Random) -> List:
+    if ratio >= 1.0:
+        return items
+    if ratio <= 0.0 or len(items) == 0:
+        return []
+    k = max(1, int(len(items) * ratio))
+    if k >= len(items):
+        return items
+    return rng.sample(items, k)
+
+
 def save_tiled_samples(
     src_img: Path,
     img_meta: dict,
@@ -165,7 +175,10 @@ def save_tiled_samples(
     stem_prefix: str,
     tiles_x: int,
     tiles_y: int,
-) -> None:
+    tile_pos_ratio: float,
+    tile_neg_ratio: float,
+    rng: random.Random,
+) -> int:
     image = cv2.imread(str(src_img))
     if image is None:
         raise RuntimeError(f"Failed to read image: {src_img}")
@@ -176,6 +189,7 @@ def save_tiled_samples(
 
     base_stem = f"{stem_prefix}_{Path(img_meta['file_name']).stem}"
 
+    tile_jobs = []
     for ty in range(tiles_y):
         for tx in range(tiles_x):
             x1 = tx * tile_w
@@ -183,7 +197,6 @@ def save_tiled_samples(
             x2 = img_w if tx == tiles_x - 1 else (tx + 1) * tile_w
             y2 = img_h if ty == tiles_y - 1 else (ty + 1) * tile_h
 
-            tile = image[y1:y2, x1:x2]
             cur_tile_w = x2 - x1
             cur_tile_h = y2 - y1
 
@@ -197,12 +210,29 @@ def save_tiled_samples(
                 tile_h=cur_tile_h,
             )
 
-            tile_stem = f"{base_stem}_tile_{ty}_{tx}"
-            dst_img = out_img_dir / f"{tile_stem}.jpg"
-            dst_lbl = out_lbl_dir / f"{tile_stem}.txt"
+            is_positive = len(yolo_lines) > 0
+            tile_jobs.append((tx, ty, x1, y1, x2, y2, yolo_lines, is_positive))
 
-            cv2.imwrite(str(dst_img), tile)
-            write_label_file(dst_lbl, yolo_lines)
+    pos_jobs = [job for job in tile_jobs if job[7]]
+    neg_jobs = [job for job in tile_jobs if not job[7]]
+
+    pos_jobs = sample_list(pos_jobs, tile_pos_ratio, rng)
+    neg_jobs = sample_list(neg_jobs, tile_neg_ratio, rng)
+
+    kept_jobs = pos_jobs + neg_jobs
+    saved = 0
+
+    for tx, ty, x1, y1, x2, y2, yolo_lines, _ in kept_jobs:
+        tile = image[y1:y2, x1:x2]
+        tile_stem = f"{base_stem}_tile_{ty}_{tx}"
+        dst_img = out_img_dir / f"{tile_stem}.jpg"
+        dst_lbl = out_lbl_dir / f"{tile_stem}.txt"
+
+        cv2.imwrite(str(dst_img), tile)
+        write_label_file(dst_lbl, yolo_lines)
+        saved += 1
+
+    return saved
 
 
 def process_clip(
@@ -216,10 +246,13 @@ def process_clip(
     make_tiles: bool,
     tiles_x: int,
     tiles_y: int,
-) -> int:
+    tile_pos_ratio: float,
+    tile_neg_ratio: float,
+    max_base_images_per_clip: int,
+) -> Tuple[int, int]:
     json_path = clip_dir / "Labels-GameState.json"
     if not json_path.exists():
-        return 0
+        return 0, 0
 
     data = json.loads(json_path.read_text(encoding="utf-8"))
     images = data["images"]
@@ -236,18 +269,24 @@ def process_clip(
     rng = random.Random(seed + hash(clip_dir.name) % 100000)
 
     all_image_ids = set(image_lookup.keys())
-    pos_image_ids = set(grouped.keys())
-    neg_image_ids = list(all_image_ids - pos_image_ids)
+    pos_image_ids = sorted(list(grouped.keys()))
+    neg_image_ids = sorted(list(all_image_ids - set(pos_image_ids)))
 
-    if negative_ratio < 1.0:
-        keep_n = int(len(neg_image_ids) * negative_ratio)
-        keep_n = max(keep_n, 0)
-        if keep_n < len(neg_image_ids):
-            neg_image_ids = rng.sample(neg_image_ids, keep_n)
+    neg_image_ids = sample_list(neg_image_ids, negative_ratio, rng)
 
-    selected_image_ids = sorted(list(pos_image_ids)) + sorted(neg_image_ids)
+    selected_image_ids = pos_image_ids + neg_image_ids
 
-    written = 0
+    if max_base_images_per_clip > 0 and len(selected_image_ids) > max_base_images_per_clip:
+        # always keep positives first, then sample negatives if needed
+        if len(pos_image_ids) >= max_base_images_per_clip:
+            selected_image_ids = pos_image_ids[:max_base_images_per_clip]
+        else:
+            remaining = max_base_images_per_clip - len(pos_image_ids)
+            sampled_neg = rng.sample(neg_image_ids, min(remaining, len(neg_image_ids)))
+            selected_image_ids = pos_image_ids + sampled_neg
+
+    written_base = 0
+    written_tiles = 0
 
     for image_id in selected_image_ids:
         img_meta = image_lookup[image_id]
@@ -263,9 +302,10 @@ def process_clip(
             stem_prefix=clip_dir.name,
             copy_images=copy_images,
         )
+        written_base += 1
 
         if make_tiles:
-            save_tiled_samples(
+            written_tiles += save_tiled_samples(
                 src_img=src_img,
                 img_meta=img_meta,
                 anns=anns,
@@ -274,11 +314,12 @@ def process_clip(
                 stem_prefix=clip_dir.name,
                 tiles_x=tiles_x,
                 tiles_y=tiles_y,
+                tile_pos_ratio=tile_pos_ratio,
+                tile_neg_ratio=tile_neg_ratio,
+                rng=rng,
             )
 
-        written += 1
-
-    return written
+    return written_base, written_tiles
 
 
 def main() -> None:
@@ -288,16 +329,22 @@ def main() -> None:
     parser.add_argument("--image-subdir", type=str, default="img1")
     parser.add_argument("--copy-images", action="store_true")
 
-    parser.add_argument("--negative-ratio", type=float, default=0.15, help="Fraction of no-ball images to keep")
+    parser.add_argument("--negative-ratio", type=float, default=0.10)
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--make-tiles", action="store_true")
     parser.add_argument("--tiles-x", type=int, default=2)
     parser.add_argument("--tiles-y", type=int, default=2)
+    parser.add_argument("--tile-pos-ratio", type=float, default=0.30)
+    parser.add_argument("--tile-neg-ratio", type=float, default=0.05)
+
+    parser.add_argument("--max-base-images-per-clip", type=int, default=0)
 
     args = parser.parse_args()
 
-    total = 0
+    total_base = 0
+    total_tiles = 0
+
     for split_name in ["train", "valid", "test"]:
         split_dir = args.input_root / split_name
         if not split_dir.exists():
@@ -307,7 +354,7 @@ def main() -> None:
         clip_dirs = [p for p in split_dir.iterdir() if p.is_dir()]
 
         for clip_dir in tqdm(clip_dirs, desc=f"Processing {split_name}"):
-            total += process_clip(
+            base_count, tile_count = process_clip(
                 clip_dir=clip_dir,
                 output_root=args.output_root,
                 split_name=yolo_split,
@@ -318,9 +365,14 @@ def main() -> None:
                 make_tiles=args.make_tiles,
                 tiles_x=args.tiles_x,
                 tiles_y=args.tiles_y,
+                tile_pos_ratio=args.tile_pos_ratio,
+                tile_neg_ratio=args.tile_neg_ratio,
+                max_base_images_per_clip=args.max_base_images_per_clip,
             )
+            total_base += base_count
+            total_tiles += tile_count
 
-    print(f"Done. Wrote {total} base images (plus tiles if enabled).")
+    print(f"Done. Base images: {total_base}, tiles: {total_tiles}, total samples: {total_base + total_tiles}")
 
 
 if __name__ == "__main__":

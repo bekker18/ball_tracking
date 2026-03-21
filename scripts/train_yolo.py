@@ -10,7 +10,7 @@ from ultralytics import YOLO
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=str, required=True)
-    parser.add_argument("--model", type=str, default="yolo11m.pt")
+    parser.add_argument("--model", type=str, default="yolo11s.pt")
     parser.add_argument("--imgsz", type=int, default=1280)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch", type=int, default=4)

@@ -160,7 +160,7 @@ def save_full_frame_sample(
     write_label_file(dst_lbl, yolo_lines)
 
 
-def save_tiled_positive_samples(
+def save_tiled_samples(
     src_img: Path,
     img_meta: dict,
     anns: List[dict],
@@ -170,8 +170,9 @@ def save_tiled_positive_samples(
     tiles_x: int,
     tiles_y: int,
     max_positive_tiles_per_image: int,
+    max_negative_tiles_per_image: int,
     rng: random.Random,
-) -> int:
+) -> Tuple[int, int]:
     image = cv2.imread(str(src_img))
     if image is None:
         raise RuntimeError(f"Failed to read image: {src_img}")
@@ -182,6 +183,8 @@ def save_tiled_positive_samples(
     base_stem = f"{stem_prefix}_{Path(img_meta['file_name']).stem}"
 
     positive_tiles = []
+    negative_tiles = []
+
     for ty in range(tiles_y):
         for tx in range(tiles_x):
             x1 = tx * tile_w
@@ -202,17 +205,22 @@ def save_tiled_positive_samples(
                 tile_h=cur_tile_h,
             )
 
+            job = (tx, ty, x1, y1, x2, y2, yolo_lines)
             if len(yolo_lines) > 0:
-                positive_tiles.append((tx, ty, x1, y1, x2, y2, yolo_lines))
-
-    if len(positive_tiles) == 0:
-        return 0
+                positive_tiles.append(job)
+            else:
+                negative_tiles.append(job)
 
     if max_positive_tiles_per_image > 0 and len(positive_tiles) > max_positive_tiles_per_image:
         positive_tiles = rng.sample(positive_tiles, max_positive_tiles_per_image)
 
-    saved = 0
-    for tx, ty, x1, y1, x2, y2, yolo_lines in positive_tiles:
+    if max_negative_tiles_per_image > 0 and len(negative_tiles) > max_negative_tiles_per_image:
+        negative_tiles = rng.sample(negative_tiles, max_negative_tiles_per_image)
+
+    saved_pos = 0
+    saved_neg = 0
+
+    for tx, ty, x1, y1, x2, y2, yolo_lines in positive_tiles + negative_tiles:
         tile = image[y1:y2, x1:x2]
         tile_stem = f"{base_stem}_tile_{ty}_{tx}"
         dst_img = out_img_dir / f"{tile_stem}.jpg"
@@ -220,9 +228,13 @@ def save_tiled_positive_samples(
 
         cv2.imwrite(str(dst_img), tile)
         write_label_file(dst_lbl, yolo_lines)
-        saved += 1
 
-    return saved
+        if len(yolo_lines) > 0:
+            saved_pos += 1
+        else:
+            saved_neg += 1
+
+    return saved_pos, saved_neg
 
 
 def process_clip(
@@ -238,10 +250,11 @@ def process_clip(
     tiles_x: int,
     tiles_y: int,
     max_positive_tiles_per_image: int,
-) -> Tuple[int, int]:
+    max_negative_tiles_per_image: int,
+) -> Tuple[int, int, int]:
     json_path = clip_dir / "Labels-GameState.json"
     if not json_path.exists():
-        return 0, 0
+        return 0, 0, 0
 
     data = json.loads(json_path.read_text(encoding="utf-8"))
     images = data["images"]
@@ -267,7 +280,8 @@ def process_clip(
     selected_image_ids = pos_image_ids + neg_image_ids
 
     written_base = 0
-    written_tiles = 0
+    written_pos_tiles = 0
+    written_neg_tiles = 0
 
     for image_id in selected_image_ids:
         img_meta = image_lookup[image_id]
@@ -285,8 +299,8 @@ def process_clip(
         )
         written_base += 1
 
-        if make_tiles and len(anns) > 0:
-            written_tiles += save_tiled_positive_samples(
+        if make_tiles:
+            pos_tiles, neg_tiles = save_tiled_samples(
                 src_img=src_img,
                 img_meta=img_meta,
                 anns=anns,
@@ -296,10 +310,13 @@ def process_clip(
                 tiles_x=tiles_x,
                 tiles_y=tiles_y,
                 max_positive_tiles_per_image=max_positive_tiles_per_image,
+                max_negative_tiles_per_image=max_negative_tiles_per_image,
                 rng=rng,
             )
+            written_pos_tiles += pos_tiles
+            written_neg_tiles += neg_tiles
 
-    return written_base, written_tiles
+    return written_base, written_pos_tiles, written_neg_tiles
 
 
 def main() -> None:
@@ -317,11 +334,13 @@ def main() -> None:
     parser.add_argument("--tiles-x", type=int, default=2)
     parser.add_argument("--tiles-y", type=int, default=2)
     parser.add_argument("--max-positive-tiles-per-image", type=int, default=1)
+    parser.add_argument("--max-negative-tiles-per-image", type=int, default=2)
 
     args = parser.parse_args()
 
     total_base = 0
-    total_tiles = 0
+    total_pos_tiles = 0
+    total_neg_tiles = 0
 
     for split_name in ["train", "valid", "test"]:
         split_dir = args.input_root / split_name
@@ -332,7 +351,7 @@ def main() -> None:
         clip_dirs = [p for p in split_dir.iterdir() if p.is_dir()]
 
         for clip_dir in tqdm(clip_dirs, desc=f"Processing {split_name}"):
-            base_count, tile_count = process_clip(
+            base_count, pos_tile_count, neg_tile_count = process_clip(
                 clip_dir=clip_dir,
                 output_root=args.output_root,
                 split_name=yolo_split,
@@ -345,11 +364,18 @@ def main() -> None:
                 tiles_x=args.tiles_x,
                 tiles_y=args.tiles_y,
                 max_positive_tiles_per_image=args.max_positive_tiles_per_image,
+                max_negative_tiles_per_image=args.max_negative_tiles_per_image,
             )
             total_base += base_count
-            total_tiles += tile_count
+            total_pos_tiles += pos_tile_count
+            total_neg_tiles += neg_tile_count
 
-    print(f"Done. Base images: {total_base}, tiles: {total_tiles}, total: {total_base + total_tiles}")
+    print(
+        f"Done. Base images: {total_base}, "
+        f"positive tiles: {total_pos_tiles}, "
+        f"negative tiles: {total_neg_tiles}, "
+        f"total: {total_base + total_pos_tiles + total_neg_tiles}"
+    )
 
 
 if __name__ == "__main__":
